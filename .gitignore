@@ -1,0 +1,15 @@
+# Zig build artifacts
+.zig-cache/
+zig-out/
+zig-pkg/
+
+# Claude Code (machine-specific / local)
+.claude/
+
+# macOS
+.DS_Store
+
+# Prebuilt guest artifacts — regenerate with tools/build-*.sh (see README)
+payloads/Image
+payloads/disk.img
+payloads/initramfs.cpio

@@ -1,0 +1,104 @@
+# vmm-arm64
+
+A small, from-scratch **arm64 virtual machine monitor** for Apple Silicon, written
+in [Zig](https://ziglang.org/). It runs on Apple's
+[Hypervisor.framework](https://developer.apple.com/documentation/hypervisor) (HVF)
+and boots a real Linux kernel into a BusyBox userspace.
+
+The goal is a readable, minimal reference for how a VMM actually works: setting up
+stage-2 memory, running a vCPU, decoding traps, emulating just enough platform
+hardware for Linux to boot, and building the device tree the kernel needs.
+
+## What it does
+
+- Creates a VM and a single vCPU through HVF and maps guest RAM at stage 2.
+- Loads an arm64 Linux `Image`, an initramfs, and a runtime-generated flattened
+  device tree (FDT) into guest memory per the arm64 boot protocol.
+- Emulates the platform the kernel probes for:
+  - a **PL011 UART** for the console,
+  - a **GICv3** interrupt controller and the architectural timer,
+  - **PSCI** (over HVC) for power control — `poweroff` in the guest halts the VM,
+  - a **virtio-blk** device backed by a raw disk image (`/dev/vda`).
+- Decodes and services system-register traps (e.g. the OS-lock registers HVF traps
+  unconditionally on cold boot) and MMIO data aborts.
+- Builds the FDT itself (`src/fdt.zig`), rather than shipping a precompiled blob.
+
+## Requirements
+
+- An **Apple Silicon** Mac (M1 or later) running macOS.
+- **Zig** — at least the version pinned in `build.zig.zon`
+  (`minimum_zig_version`); this project tracks a 0.17-dev toolchain.
+- **Docker** — only to build the guest payloads (kernel, initramfs, disk). The
+  build scripts compile inside an arm64 Debian container so a case-insensitive
+  macOS filesystem doesn't corrupt the Linux source tree.
+
+The VMM binary is ad-hoc codesigned with the `com.apple.security.hypervisor`
+entitlement on every build (see `build.zig`). HVF only grants a VM to an entitled,
+signed binary, so it must be run from a build (`zig build run`), never a bare
+`zig run`.
+
+## Building the guest payloads
+
+The prebuilt guest artifacts are **not** committed (a 45 MB kernel and GPL guest
+images don't belong in the repo). Generate them once with the scripts in `tools/`,
+which write into `payloads/`:
+
+```bash
+tools/build-kernel.sh      # -> payloads/Image           (arm64 Linux kernel)
+tools/build-initramfs.sh   # -> payloads/initramfs.cpio  (BusyBox rootfs)
+tools/build-disk.sh        # -> payloads/disk.img         (ext4 virtio-blk backing store)
+```
+
+The kernel and BusyBox `.config` files used by those scripts are committed under
+`payloads/` for reference.
+
+## Running
+
+```bash
+zig build run
+```
+
+This compiles and signs the VMM, then boots the guest. Guest console output is
+mirrored to the host. Run `poweroff` inside the guest shell to stop the VM.
+
+## Testing
+
+```bash
+zig build test
+```
+
+The tests are pure logic — trap and register decoders, the FDT serializer, and the
+device-servicing paths against fake vCPUs. They never call into HVF (the test binary
+is unsigned, so any `hv_*` call would be denied), so they run anywhere Zig builds.
+
+## Layout
+
+| Path | What it is |
+| --- | --- |
+| `src/main.zig` | Entry point; sets up the machine and runs it. |
+| `src/machine.zig` | The VM: RAM, vCPU loop, exit/trap dispatch, device wiring. |
+| `src/hvf.zig` | Thin wrappers over Hypervisor.framework. |
+| `src/vcpu.zig` | vCPU state and run/exit handling. |
+| `src/arm.zig` | AArch64 register and exception-syndrome (ESR) decode tables. |
+| `src/gic.zig` | GICv3 setup and the architectural timer. |
+| `src/psci.zig` | PSCI calls over HVC. |
+| `src/fdt.zig` | Flattened device tree serializer. |
+| `src/device_tree.zig` | Builds the guest's device tree. |
+| `src/linux_boot.zig` | arm64 Linux boot protocol: payload placement and registers. |
+| `src/loader.zig`, `src/image_header.zig` | Payload loading and Image-header parsing. |
+| `src/platform.zig`, `src/bus.zig` | Memory map and MMIO bus. |
+| `tools/` | Scripts that build the guest payloads. |
+
+Device models (UART, virtio, register-bit helpers) live in a separate reusable
+package, [virtual-hardware](https://github.com/ozencozturk/virtual-hardware),
+pulled in as a Zig dependency.
+
+## License
+
+[MIT](LICENSE). Note that the guest payloads you build with the `tools/` scripts
+(the Linux kernel and BusyBox) are covered by their own licenses (GPL), not this one.
+
+## Acknowledgements
+
+Parts of this project were developed with assistance from AI coding tools
+(Claude). All code was reviewed and is maintained by the author.
