@@ -5,6 +5,7 @@ pub const Target = union(enum) {
     poweroff,
     uart: usize,
     virtio: usize,
+    vconsole: usize,
 };
 
 pub fn route(pa: platform.Ipa) ?Target {
@@ -14,6 +15,7 @@ pub fn route(pa: platform.Ipa) ?Target {
                 .poweroff => .poweroff,
                 .uart => .{ .uart = pa - r.base },
                 .virtio => .{ .virtio = pa - r.base },
+                .vconsole => .{ .vconsole = pa - r.base },
             };
         }
     }

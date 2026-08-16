@@ -61,7 +61,7 @@ pub fn build(buf: []u8, p: Params) ![]u8 {
 
     const choosen_props: []const Prop = &.{
         .{ .name = "bootargs", .value = .{ .string = try na.print(
-            "earlycon=uart8250,mmio,0x{x} console=ttyS0 ignore_loglevel",
+            "earlycon=uart8250,mmio,0x{x} console=hvc0 ignore_loglevel",
             .{platform.UART_BASE},
         ) } },
         .{ .name = "stdout-path", .value = .{ .string = try na.print(
@@ -145,6 +145,16 @@ pub fn build(buf: []u8, p: Params) ![]u8 {
             .{ .name = "interrupts", .value = .{ .cells = &virtio_ints } },
         },
     };
+    const vconsole_reg = [_]u32{ hi(platform.VCONSOLE_BASE), lo(platform.VCONSOLE_BASE), hi(platform.VCONSOLE_SIZE), lo(platform.VCONSOLE_SIZE) };
+    const vconsole_ints = [_]u32{ 0, platform.VCONSOLE_SPI, 0x04 };
+    const vconsole: Node = .{
+        .name = try na.print("virtio_mmio@{x}", .{platform.VCONSOLE_BASE}),
+        .props = &.{
+            .{ .name = "compatible", .value = .{ .string = "virtio,mmio" } },
+            .{ .name = "reg", .value = .{ .cells = &vconsole_reg } },
+            .{ .name = "interrupts", .value = .{ .cells = &vconsole_ints } },
+        },
+    };
     const psci: Node = .{ .name = "psci", .props = &.{
         .{ .name = "compatible", .value = .{ .strings = &.{ "arm,psci-1.0", "arm,psci-0.2" } } },
         .{ .name = "method", .value = .{ .string = "hvc" } },
@@ -153,7 +163,7 @@ pub fn build(buf: []u8, p: Params) ![]u8 {
     const root = Node{
         .name = "",
         .props = root_props,
-        .children = &.{ chosen, memory, cpus, int_controller, timer, serial, psci, virtio },
+        .children = &.{ chosen, memory, cpus, int_controller, timer, serial, psci, virtio, vconsole },
     };
 
     return fdt.serialize(buf, &strings, root);
@@ -221,3 +231,37 @@ test "device_tree: the virtio-mmio node carries reg and a level-high SPI from th
     std.mem.writeInt(u32, ints[8..12], 0x04, .big); // IRQ_TYPE_LEVEL_HIGH
     try testing.expect(std.mem.indexOf(u8, blob, &ints) != null);
 }
+
+test "device_tree: the virtio-console node carries its own reg and SPI, distinct from the block device's" {
+    var buf: [4096]u8 = undefined;
+    var name_scratch: [64]u8 = undefined;
+    const blob = try build(&buf, .{ .initrd_start = 0x9000_0000, .initrd_end = 0x9022_0800 });
+
+    const node_name = try std.fmt.bufPrint(&name_scratch, "virtio_mmio@{x}", .{platform.VCONSOLE_BASE});
+    const at = std.mem.indexOf(u8, blob, node_name) orelse return error.NodeMissing;
+
+    var reg: [16]u8 = undefined;
+    std.mem.writeInt(u32, reg[0..4], hi(platform.VCONSOLE_BASE), .big);
+    std.mem.writeInt(u32, reg[4..8], lo(platform.VCONSOLE_BASE), .big);
+    std.mem.writeInt(u32, reg[8..12], hi(platform.VCONSOLE_SIZE), .big);
+    std.mem.writeInt(u32, reg[12..16], lo(platform.VCONSOLE_SIZE), .big);
+    try testing.expect(std.mem.indexOfPos(u8, blob, at, &reg) != null);
+
+    var ints: [12]u8 = undefined;
+    std.mem.writeInt(u32, ints[0..4], 0, .big);
+    std.mem.writeInt(u32, ints[4..8], platform.VCONSOLE_SPI, .big);
+    std.mem.writeInt(u32, ints[8..12], 0x04, .big);
+    try testing.expect(std.mem.indexOfPos(u8, blob, at, &ints) != null);
+
+    try testing.expect(platform.VCONSOLE_SPI != platform.VIRTIO_SPI);
+    try testing.expect(platform.VCONSOLE_BASE != platform.VIRTIO_BASE);
+}
+
+test "device_tree: the cmdline hands the console to hvc0 and keeps earlycon on the 8250" {
+    var buf: [4096]u8 = undefined;
+    const blob = try build(&buf, .{ .initrd_start = 0x9000_0000, .initrd_end = 0x9022_0800 });
+    try testing.expect(std.mem.indexOf(u8, blob, "console=hvc0") != null);
+    try testing.expect(std.mem.indexOf(u8, blob, "earlycon=uart8250") != null);
+    try testing.expect(std.mem.indexOf(u8, blob, "console=ttyS0") == null);
+}
+

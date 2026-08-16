@@ -19,11 +19,16 @@ const RAM_SIZE = @import("platform.zig").RAM_SIZE;
 const POWEROFF_BASE = @import("platform.zig").POWEROFF_BASE;
 const UART_BASE = @import("platform.zig").UART_BASE;
 
+// virtio-mmio QueueNotify. The package's `Reg` enum is private, so the offset is
+// restated here; vconsole.zig:37 is the source of truth.
+const QUEUE_NOTIFY: usize = 0x050;
+
 pub const Machine = struct {
     ram: []align(std.heap.page_size_min) u8,
     vcpu: Vcpu,
     uart: devices.Uart = .{},
     virtio: devices.Virtio = .{},
+    vconsole: devices.VirtioConsole = .{},
     out: *std.Io.Writer, // where captured guest console TX is mirrored
     fault: ?Fault = null,
     uart_lock: std.atomic.Mutex = .unlocked,
@@ -96,7 +101,13 @@ pub const Machine = struct {
         // Only possible now the vCPU exists with its affinity set — see the fn.
         try gic.checkRedistributorBase(cpu.id);
 
-        return .{ .ram = ram, .vcpu = cpu, .out = out, .virtio = .{ .disk = disk } };
+        return .{
+            .ram = ram,
+            .vcpu = cpu,
+            .out = out,
+            .virtio = .{ .disk = disk },
+            .vconsole = .{ .out = .{ .ctx = out, .write = &writeConsole } },
+        };
     }
 
     /// Boot a raw hand-written blob at the base of RAM, for running small test
@@ -126,6 +137,9 @@ pub const Machine = struct {
     fn syncVirtioIrq(self: *Machine, irq: anytype) void {
         irq.setVirtio(self.virtio.irqAsserted());
     }
+    fn syncVconsoleIrq(self: *Machine, irq: anytype) void {
+        irq.setVconsole(self.vconsole.irqAsserted());
+    }
     // The exit/resume loop, generic over the vCPU seam so a fake can drive it.
     // Returns the exit count once the guest powers off.
     fn runOn(self: *Machine, cpu: anytype, irq: anytype) !u64 {
@@ -136,8 +150,10 @@ pub const Machine = struct {
             const stop = try self.handleExit(cpu, exit);
             lockUart(self);
             self.syncUartIrq(irq);
+            self.vconsole.serviceRx(self.ram, RAM_BASE);
             self.uart_lock.unlock();
             self.syncVirtioIrq(irq);
+            self.syncVconsoleIrq(irq);
             if (stop) {
                 break;
             }
@@ -190,6 +206,19 @@ pub const Machine = struct {
             try cpu.setGpr(iss.srt, try self.uart.load(offset, iss.size()));
         }
     }
+    fn serviceVconsole(self: *Machine, cpu: anytype, offset: usize, iss: DataAbortIss) !void {
+        if (iss.isWrite()) {
+            const value = try cpu.getGpr(iss.srt);
+            try self.vconsole.store(offset, iss.size(), value);
+            if (offset == QUEUE_NOTIFY) {
+                self.lockUart();
+                defer self.uart_lock.unlock();
+                self.vconsole.notify(@truncate(value), self.ram, RAM_BASE);
+            }
+        } else {
+            try cpu.setGpr(iss.srt, try self.vconsole.load(offset, iss.size()));
+        }
+    }
     fn serviceVirtio(self: *Machine, cpu: anytype, offset: usize, iss: DataAbortIss) !void {
         if (iss.isWrite()) {
             try self.virtio.store(offset, iss.size(), try cpu.getGpr(iss.srt));
@@ -217,6 +246,7 @@ pub const Machine = struct {
             .poweroff => return true,
             .uart => |off| try self.serviceUart(cpu, off, iss),
             .virtio => |off| try self.serviceVirtio(cpu, off, iss),
+            .vconsole => |off| try self.serviceVconsole(cpu, off, iss),
         }
         try cpu.advancePc();
         return false;
@@ -225,6 +255,12 @@ pub const Machine = struct {
     // Mirror captured UART TX bytes to `out`, then reset the device's capture
     // buffer so it never reaches its 64 KiB cap — past which UartBuffer.push
     // silently drops (fatal for a long interactive session).
+    fn writeConsole(ctx: ?*anyopaque, bytes: []const u8) void {
+        const w: *std.Io.Writer = @ptrCast(@alignCast(ctx.?));
+        w.writeAll(bytes) catch {};
+        w.flush() catch {};
+    }
+
     fn drainUart(self: *Machine) void {
         const n = self.uart.tx_buffer.len;
         if (n == 0) return;
@@ -260,7 +296,10 @@ pub const Machine = struct {
             if (self.uart.rxHasSpace()) {
                 self.uart.receive(byte[0]);
             }
+            _ = self.vconsole.pushInput(byte[0]);
+            self.vconsole.serviceRx(self.ram, RAM_BASE);
             self.syncUartIrq(irq);
+            self.syncVconsoleIrq(irq);
             self.uart_lock.unlock();
         }
     }
@@ -272,6 +311,9 @@ const HvfIrq = struct {
     }
     fn setVirtio(_: HvfIrq, level: bool) void {
         _ = hvf.hv_gic_set_spi(platform.VIRTIO_INTID, level);
+    }
+    fn setVconsole(_: HvfIrq, level: bool) void {
+        _ = hvf.hv_gic_set_spi(platform.VCONSOLE_INTID, level);
     }
 };
 
@@ -383,6 +425,8 @@ const FakeIrq = struct {
     n: usize = 0,
     vlog: [16]bool = undefined,
     vn: usize = 0,
+    clog: [16]bool = undefined,
+    cn: usize = 0,
     fn setUart(self: *FakeIrq, level: bool) void {
         if (self.n < self.log.len) {
             self.log[self.n] = level;
@@ -393,6 +437,12 @@ const FakeIrq = struct {
         if (self.vn < self.vlog.len) {
             self.vlog[self.vn] = level;
             self.vn += 1;
+        }
+    }
+    fn setVconsole(self: *FakeIrq, level: bool) void {
+        if (self.cn < self.clog.len) {
+            self.clog[self.cn] = level;
+            self.cn += 1;
         }
     }
     fn last(self: *const FakeIrq) ?bool {
@@ -796,6 +846,37 @@ test "serviceVirtio: a word read returns the device register value and advances 
     const stop = try m.serviceDataAbort(&cpu, wordAbort(false, 4, platform.VIRTIO_BASE + 0x00));
     try testing.expect(!stop);
     try testing.expectEqual(@as(u64, devices.Virtio.MAGIC_VAL), cpu.regs[4]);
+    try testing.expectEqual(@as(u64, 4), cpu.pc);
+}
+
+test "serviceVconsole: a word read at the console slot returns DeviceID 3, not the block device's 2" {
+    var m = mkMachine();
+    var cpu = FakeVcpu{};
+
+    const stop = try m.serviceDataAbort(&cpu, wordAbort(false, 4, platform.VCONSOLE_BASE + 0x008));
+    try testing.expect(!stop);
+    try testing.expectEqual(@as(u64, 3), cpu.regs[4]);
+    try testing.expectEqual(@as(u64, 4), cpu.pc);
+
+    _ = try m.serviceDataAbort(&cpu, wordAbort(false, 5, platform.VIRTIO_BASE + 0x008));
+    try testing.expectEqual(@as(u64, 2), cpu.regs[5]);
+}
+
+test "writeConsole: the sink mirrors virtio-console TX to the machine's out writer" {
+    var buf: [64]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    Machine.writeConsole(&w, "hvc");
+    try testing.expectEqualStrings("hvc", w.buffered());
+}
+
+test "serviceVconsole: a QueueNotify store routes to the device and advances PC" {
+    var ram_backing: [4096]u8 align(std.heap.page_size_min) = @splat(0);
+    var m = mkMachine();
+    m.ram = &ram_backing;
+    var cpu = FakeVcpu{};
+    cpu.regs[3] = 0;
+    const stop = try m.serviceDataAbort(&cpu, wordAbort(true, 3, platform.VCONSOLE_BASE + QUEUE_NOTIFY));
+    try testing.expect(!stop);
     try testing.expectEqual(@as(u64, 4), cpu.pc);
 }
 

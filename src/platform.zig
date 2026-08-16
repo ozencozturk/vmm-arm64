@@ -13,6 +13,10 @@ pub const UART_INTID: u32 = SPI_BASE + UART_SPI;
 pub const VIRTIO_SPI: u32 = 2;
 pub const VIRTIO_INTID: u32 = SPI_BASE + VIRTIO_SPI;
 pub const VIRTIO_SIZE = devices.Virtio.VIRTIO_SIZE;
+
+pub const VCONSOLE_SPI: u32 = 3;
+pub const VCONSOLE_INTID: u32 = SPI_BASE + VCONSOLE_SPI;
+pub const VCONSOLE_SIZE = devices.VirtioConsole.MMIO_SIZE;
 // ---- Platform memory map — SINGLE SOURCE OF TRUTH -------------------------
 // The device tree handed to the guest, the interrupt-controller config, and the
 // loader/stage-2 map all derive from these constants. A disagreement between any
@@ -80,6 +84,9 @@ pub const UART_SIZE: usize = devices.Uart.UART_SIZE;
 // below the UART, leaving 64 MiB of slot space.
 pub const VIRTIO_BASE: Ipa = 0x0c00_0000;
 
+// virtio-mmio slot 1, immediately above the block device's window.
+pub const VCONSOLE_BASE: Ipa = VIRTIO_BASE + VIRTIO_SIZE;
+
 // Poweroff register: a store here halts the machine. Not modelled on real
 // hardware — it is the halt mechanism for hand-written test blobs, which have no
 // firmware to call. A kernel guest powers off via PSCI and never touches this.
@@ -98,11 +105,12 @@ pub const hvf_owned = [_]Region{
     .{ .base = GICR_BASE, .size = GICR_REGION_SIZE },
 };
 
-pub const Device = enum { uart, virtio, poweroff };
+pub const Device = enum { uart, virtio, vconsole, poweroff };
 /// Holes vmm services: every one of these must have a branch in serviceDataAbort.
 pub const emulated = [_]Region{
     .{ .base = UART_BASE, .size = UART_SIZE, .device = .uart },
     .{ .base = VIRTIO_BASE, .size = VIRTIO_SIZE, .device = .virtio },
+    .{ .base = VCONSOLE_BASE, .size = VCONSOLE_SIZE, .device = .vconsole },
     .{ .base = POWEROFF_BASE, .size = POWEROFF_SIZE, .device = .poweroff },
 };
 
