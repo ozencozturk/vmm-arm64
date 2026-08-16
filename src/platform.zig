@@ -1,5 +1,5 @@
 const std = @import("std");
-const devices = @import("devices");
+const devices = @import("virtual_devices");
 pub const Ipa = u64;
 pub const RAM_BASE: Ipa = 0x8000_0000; // 2 GiB
 pub const MiB = 1024 * 1024;

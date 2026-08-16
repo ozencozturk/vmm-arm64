@@ -32,9 +32,9 @@
     // Once all dependencies are fetched, `zig build` no longer requires
     // internet connectivity.
     .dependencies = .{
-        .virtual_hardware = .{
-            .url = "git+https://github.com/ozencozturk/virtual-hardware.git#b365514613c22ef81fae5301a8d61ea43f0a8d44",
-            .hash = "virtual_hardware-0.1.0-aicKtt2TAQAMreQx7ixiA_M7EGfWp4jSSDlBFa_Jqqt8",
+        .virtual_platform = .{
+            .url = "git+https://github.com/ozencozturk/virtual-platform.git#058a4a7c8cd57befca267a73e0648c39a3c23a21",
+            .hash = "virtual_platform-0.1.0-WNlQZTeUAQBuIiclPEwhT6uSGgvko3Nrzn1nCAqhFOry",
         },
         // See `zig fetch --save <url>` for a command-line interface for adding dependencies.
         //.example = .{

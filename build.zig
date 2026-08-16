@@ -4,8 +4,8 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    // Reusable hardware device models live in the virtual-hardware package.
-    const vhw = b.dependency("virtual_hardware", .{});
+    // Reusable hardware device models live in the virtual-platform package.
+    const vp = b.dependency("virtual_platform", .{});
 
     const exe = b.addExecutable(.{
         .name = "vmm-arm64",
@@ -14,7 +14,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "devices", .module = vhw.module("devices") },
+                .{ .name = "virtual_devices", .module = vp.module("virtual_devices") },
             },
         }),
     });
