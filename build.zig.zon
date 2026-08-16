@@ -33,8 +33,8 @@
     // internet connectivity.
     .dependencies = .{
         .virtual_hardware = .{
-            .url = "git+https://github.com/ozencozturk/virtual-hardware.git#b06f13ce05c0448a4c643f1e6346d85201dfb51a",
-            .hash = "virtual_hardware-0.1.0-aicKtm0WAQA46vJncYZOT5PB7N1sRfAJRR1_3yEeWkGn",
+            .url = "git+https://github.com/ozencozturk/virtual-hardware.git#b365514613c22ef81fae5301a8d61ea43f0a8d44",
+            .hash = "virtual_hardware-0.1.0-aicKtt2TAQAMreQx7ixiA_M7EGfWp4jSSDlBFa_Jqqt8",
         },
         // See `zig fetch --save <url>` for a command-line interface for adding dependencies.
         //.example = .{
