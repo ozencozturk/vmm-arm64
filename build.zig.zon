@@ -33,8 +33,8 @@
     // internet connectivity.
     .dependencies = .{
         .virtual_platform = .{
-            .url = "git+https://github.com/ozencozturk/virtual-platform.git#e626b2d3a38d394cda8b236d0d67d853cad22a8a",
-            .hash = "virtual_platform-0.1.0-WNlQZctSAgBivHq6lk4oacwepz0aoRDdJ_2pNu5rCRNl",
+            .url = "git+https://github.com/ozencozturk/virtual-platform.git#180fea2da9c948353ac3e9fd09b3bd5bdfe4e6e0",
+            .hash = "virtual_platform-0.1.0-WNlQZR4QAwAmzfIKWab6kyfqJWNboKdKmJcJB-YCrByE",
         },
         // See `zig fetch --save <url>` for a command-line interface for adding dependencies.
         //.example = .{
