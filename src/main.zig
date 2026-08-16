@@ -36,12 +36,10 @@ test {
     _ = @import("hvf.zig");
     _ = @import("gic.zig");
     _ = @import("bus.zig");
-    _ = @import("fdt.zig");
     _ = @import("device_tree.zig");
     _ = @import("psci.zig");
     _ = @import("vcpu.zig");
     _ = @import("machine.zig");
     _ = @import("loader.zig");
-    _ = @import("image_header.zig");
-    _ = @import("linux_boot.zig");
+    _ = @import("boot_layout.zig");
 }

@@ -15,6 +15,8 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "virtual_devices", .module = vp.module("virtual_devices") },
+                .{ .name = "fdt", .module = vp.module("fdt") },
+                .{ .name = "linux_boot", .module = vp.module("linux_boot") },
             },
         }),
     });

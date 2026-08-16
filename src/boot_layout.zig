@@ -1,6 +1,6 @@
 const std = @import("std");
 const loader = @import("loader.zig");
-const ImageHeader = @import("image_header.zig").ImageHeader;
+const ImageHeader = @import("linux_boot").arm64.ImageHeader;
 const hvf = @import("hvf.zig");
 const device_tree = @import("device_tree.zig");
 const RAM_BASE = @import("platform.zig").RAM_BASE;

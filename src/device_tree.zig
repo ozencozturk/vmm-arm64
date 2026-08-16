@@ -1,6 +1,6 @@
 const std = @import("std");
 const testing = std.testing;
-const fdt = @import("fdt.zig");
+const fdt = @import("fdt");
 const platform = @import("platform.zig");
 const Prop = fdt.Prop;
 const Node = fdt.Node;
