@@ -177,12 +177,16 @@ pub const Machine = struct {
     }
 
     fn serviceUart(self: *Machine, cpu: anytype, offset: usize, iss: DataAbortIss) !void {
-        self.lockUart();
-        defer self.uart_lock.unlock();
         if (iss.isWrite()) {
-            try self.uart.store(offset, iss.size(), try cpu.getGpr(iss.srt));
+            {
+                self.lockUart();
+                defer self.uart_lock.unlock();
+                try self.uart.store(offset, iss.size(), try cpu.getGpr(iss.srt));
+            }
             self.drainUart();
         } else {
+            self.lockUart();
+            defer self.uart_lock.unlock();
             try cpu.setGpr(iss.srt, try self.uart.load(offset, iss.size()));
         }
     }
@@ -220,12 +224,11 @@ pub const Machine = struct {
 
     // Mirror captured UART TX bytes to `out`, then reset the device's capture
     // buffer so it never reaches its 64 KiB cap — past which UartBuffer.push
-    // silently drops (fatal for a long interactive session). Called only after a
-    // THR store, under uart_lock; the vCPU thread is the sole TX writer, so this
-    // drain-and-reset needs no synchronization beyond the lock already held.
+    // silently drops (fatal for a long interactive session).
     fn drainUart(self: *Machine) void {
-        const buf = self.uart.tx_buffer.data[0..self.uart.tx_buffer.len];
-        self.out.writeAll(buf) catch {};
+        const n = self.uart.tx_buffer.len;
+        if (n == 0) return;
+        self.out.writeAll(self.uart.tx_buffer.data[0..n]) catch {};
         self.out.flush() catch {};
         self.uart.tx_buffer.len = 0;
     }
