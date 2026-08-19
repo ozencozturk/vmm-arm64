@@ -210,7 +210,7 @@ pub const Machine = struct {
         if (iss.isWrite()) {
             switch (try self.vconsole.store(offset, iss.size(), try cpu.getGpr(iss.srt))) {
                 // A receive kick drains the input FIFO, which the reader thread
-                // also writes, so this shares the console lock.
+                // also writes, so this takes the console lock.
                 .notify => |q| {
                     self.lockUart();
                     defer self.uart_lock.unlock();
@@ -255,9 +255,9 @@ pub const Machine = struct {
         return false;
     }
 
-    // Take what the guest wrote to the virtio console out to `out`. Until it is
-    // taken the device holds it, and a full ring stops the guest rather than
-    // losing any of it. `output` answers one contiguous run, so this loops.
+    // Write what the guest sent to the virtio console out to `out` and release it
+    // back to the device. `output` answers one contiguous run of the ring, so a
+    // wrapped ring needs a second pass — hence the loop.
     fn drainVconsole(self: *Machine) void {
         while (true) {
             const bytes = self.vconsole.output();

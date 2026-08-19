@@ -1,31 +1,25 @@
 #!/bin/sh
 # Build the arm64 Linux kernel Image for the vmm guest.
 #
-# WHY DOCKER: a Linux checkout has case-colliding filenames that corrupt on a
-# default case-insensitive macOS (APFS) volume. We build inside an arm64 Debian
-# container so the kernel tree lives on the container's case-sensitive fs and
-# never touches the host — only the finished Image + .config are copied out.
-# The container is arm64-native on Apple Silicon (no emulation), so the native
-# gcc is already an arm64 compiler → no CROSS_COMPILE needed.
-# (Debian, not Ubuntu: one multi-arch CDN mirror instead of ports.ubuntu.com.)
+# Builds inside an arm64 Debian container: a Linux checkout has case-colliding
+# filenames that corrupt on a case-insensitive macOS volume. The container is
+# arm64-native on Apple Silicon, so no CROSS_COMPILE is needed.
 #
-# OUTPUT:  payloads/Image          (the raw, 2 MiB-alignable kernel binary)
-#          payloads/kernel.config  (the resolved .config, for reproducibility)
+# OUTPUT:  payloads/Image          the kernel binary
+#          payloads/kernel.config  the resolved .config
 #
-# Re-runs are incremental: the kernel source + object files persist in a Docker
-# named volume ($KVOL). Delete it to start clean: docker volume rm $KVOL
+# Source and objects persist in the docker volume $KVOL, so re-runs are
+# incremental. Clean build: docker volume rm $KVOL
 #
 # Overridable via env:
-#   KERNEL_TAG=v6.12   which stable tag to build
-#   JOBS=N             parallelism
+#   KERNEL_TAG=v6.12        stable tag to build
+#   JOBS=N                  parallelism
 #   IMG=debian:stable-slim  build image
-#   KVOL=vmm-kbuild    docker volume holding source and objects
-#   PLATFORMS="A B"    SoC platforms to turn off (see below)
-#   DISABLE="A B C"    extra CONFIG_ symbols to turn off, applied after PLATFORMS
-#   ENABLE="A B C"     extra CONFIG_ symbols to turn on, applied after DISABLE
-#   OUT=<dir>          where to write Image and kernel.config; the default is the
-#                      payloads directory the VMM boots from, so an experiment
-#                      that must not replace the shipped guest points elsewhere
+#   KVOL=vmm-kbuild         docker volume holding source and objects
+#   PLATFORMS="A B"         SoC platforms to disable
+#   DISABLE="A B C"         further CONFIG_ symbols to disable, applied after PLATFORMS
+#   ENABLE="A B C"          CONFIG_ symbols to enable, applied after DISABLE
+#   OUT=<dir>               where to write Image and kernel.config
 set -eu
 cd "$(dirname "$0")/.."
 
@@ -36,22 +30,14 @@ KVOL="${KVOL:-vmm-kbuild}"
 OUT="${OUT:-$PWD/payloads}"
 case "$OUT" in /*) ;; *) OUT="$PWD/$OUT" ;; esac
 
-# WHY A SLIM GUEST: arm64 defconfig is a single kernel meant to boot every arm64
-# machine that exists, and it costs what that implies — a 45 MB Image, 1100-odd
-# modules, and a boot that probes for hardware this VMM does not have. What this
-# guest actually sees is a PL011-compatible 8250, a GICv3, the architectural
-# timer, PSCI over HVC, and two virtio-mmio windows. Everything else initialises
-# for a device that cannot exist.
+# SoC platforms disabled. Vendor drivers are `depends on ARCH_<vendor> ||
+# COMPILE_TEST`, so disabling one platform drops its clock, pinctrl, PHY,
+# regulator, MMC, PCI-host and SoC-glue drivers with it. Only top-level vendors
+# are listed: ARCH_BCM2835 goes with ARCH_BCM, ARCH_LAYERSCAPE/MXC/S32 with
+# ARCH_NXP, the Renesas R8A parts with ARCH_RENESAS.
 #
-# The lever is the SoC platform list, not the driver list. Vendor drivers are
-# `depends on ARCH_<vendor> || COMPILE_TEST`, so turning a platform off drops its
-# clock, pinctrl, PHY, regulator, MMC, PCI-host and SoC glue with it — one symbol
-# each instead of hundreds. Only top-level vendors are named here; the sub-
-# platforms (ARCH_BCM2835 under ARCH_BCM, ARCH_LAYERSCAPE/MXC/S32 under ARCH_NXP,
-# the Renesas R8A parts under ARCH_RENESAS) go with their parent.
-#
-# Nothing here is a claim that a guest may never want these. It is a statement of
-# what this VMM presents today: re-enable a platform the moment one is emulated.
+# arm64 defconfig enables 44 of these; this VMM presents an 8250, a GICv3, the
+# architectural timer, PSCI over HVC and two virtio-mmio windows.
 PLATFORMS="${PLATFORMS-ARCH_ACTIONS ARCH_AIROHA ARCH_SUNXI ARCH_ALPINE ARCH_APPLE \
 ARCH_BCM ARCH_BERLIN ARCH_EXYNOS ARCH_SPARX5 ARCH_K3 ARCH_LG1K ARCH_HISI \
 ARCH_KEEMBAY ARCH_MEDIATEK ARCH_MESON ARCH_MVEBU ARCH_NXP ARCH_MA35 ARCH_NPCM \
@@ -60,46 +46,26 @@ ARCH_INTEL_SOCFPGA ARCH_STM32 ARCH_SYNQUACER ARCH_TEGRA ARCH_TESLA_FSD \
 ARCH_SPRD ARCH_THUNDER ARCH_THUNDER2 ARCH_UNIPHIER ARCH_VEXPRESS \
 ARCH_VISCONTI ARCH_XGENE ARCH_ZYNQMP}"
 
-# What the platform cull cannot reach: subsystems that are generic, so they do
-# not depend on any ARCH_ symbol and survive every vendor going away.
+# Symbols no ARCH_ cull reaches, since they depend on no platform.
 #
-# The first group is hardware this VMM does not present. PCI is the notable one
-# and the notable difference from the x86 side of this project — there the guest
-# enumerates through ACPI and needs a PCI bus behind it, here the guest is handed
-# a device tree that names two virtio-mmio windows and nothing else. ACPI goes
-# with it for the same reason: this VMM builds a DTB, and an arm64 kernel that
-# finds no ACPI tables falls back to the device tree anyway, so the code is
-# unreachable rather than merely unused. EFI likewise — the VMM loads the Image
-# and jumps to it per the arm64 boot protocol, so the EFI stub is never entered.
-#
-# MODULES is the other structural one. Nothing loads a module in this guest and
-# defconfig marks 1167 symbols =m; with MODULES off kconfig resolves those to n
-# instead of building them. It does not shrink the Image — modules were never in
-# it — but it removes the whole second build and the loader path with it.
-#
-# COMPAT is 32-bit ARM userspace, in a guest whose init is an arm64 busybox.
-#
-# The second group is debug and instrumentation facilities that cost boot time
-# and report to nobody. PRINTK_TIME is deliberately kept: the console timestamps
-# are how a boot is read.
-#
-# The third group mirrors the x86 guest's list, restricted to symbols an arm64
-# kernel also knows, so the two guests differ by architecture and not by taste.
-# INET6_ESP/INET6_AH are IPv6 IPsec in a guest with no network interface, and
-# they are the root of a chain that ends at CRYPTO_JITTERENTROPY. Disabling the
-# tail alone does nothing — olddefconfig re-selects it from the top — and cutting
-# only INET6_ESP is not enough either, because SEQIV and ECHAINIV carry prompts
-# and so survive their selector going away. Every entry point has to be named.
-#
-# The fourth group is what MODULES=n promotes rather than removes. defconfig
-# marks these =m, and a tristate whose module option is gone resolves to its
-# built-in default instead of vanishing — so cutting MODULES puts btrfs, NFS and
-# overlayfs INTO the image, which is the opposite of the intent. They are named
-# here for the same reason as everything else: this guest mounts one ext4 image
-# on /dev/vda and runs its root from the initramfs, so EXT4 and JBD2 stay and the
-# rest go. KVM is nested virtualisation in a guest that hosts nothing, NUMA is a
-# second memory node that does not exist, and the networking group is a stack
-# with no interface under it.
+#   PCI, ACPI, EFI
+#       The guest is handed a DTB and entered per the arm64 boot protocol, so
+#       none of the three is reached. (The x86 side of this project keeps PCI
+#       and ACPI: it enumerates through the DSDT.)
+#   MODULES, COMPAT
+#       Nothing loads a module; userspace is arm64.
+#   BTRFS_FS ... IPV6 (last group)
+#       defconfig marks these =m. With MODULES=n a tristate falls back to its
+#       built-in default rather than disappearing, so they must be named or they
+#       end up IN the image. EXT4_FS and JBD2 are kept for /dev/vda.
+#   INET6_ESP, INET6_AH, CRYPTO_SEQIV, CRYPTO_ECHAINIV, CRYPTO_DRBG_MENU,
+#   CRYPTO_JITTERENTROPY
+#       One selection chain. Each carries its own prompt, so disabling the tail
+#       alone lets olddefconfig re-select it from the top; every entry point has
+#       to be named.
+#   the rest
+#       Hardware this VMM does not present, and debug facilities. PRINTK_TIME is
+#       kept: the console timestamps are how a boot is read.
 DISABLE="${DISABLE-PCI ACPI EFI MODULES COMPAT \
 DRM SOUND USB_SUPPORT ATA SCSI NVME_CORE MMC MTD MD I2C SPI INPUT HID \
 NETDEVICES ETHERNET WLAN BT MEDIA_SUPPORT IIO PWM REGULATOR PHY_CAN_TRANSCEIVER \
@@ -150,9 +116,8 @@ docker run --rm \
 
         make ARCH=arm64 defconfig
 
-        # What this VMM actually presents to the guest (idempotent; olddefconfig
-        # below then resolves dependencies). Applied BEFORE the culls, so a
-        # symbol named in both ends up off — the cull is the later word.
+        # What this VMM presents to the guest. Applied before the culls, so a
+        # symbol named in both ends up disabled.
         for opt in \
             SERIAL_8250 SERIAL_8250_CONSOLE SERIAL_OF_PLATFORM SERIAL_EARLYCON \
             BLK_DEV_INITRD DEVTMPFS DEVTMPFS_MOUNT \
@@ -166,8 +131,8 @@ docker run --rm \
 
         make ARCH=arm64 olddefconfig
 
-        # A cull that olddefconfig quietly undid is the failure mode this whole
-        # script exists to avoid, and it is invisible in a build that succeeds.
+        # olddefconfig can re-resolve a symbol either way, and the build still
+        # succeeds when it does. Check both directions.
         for opt in VIRTIO_MMIO VIRTIO_BLK VIRTIO_CONSOLE SERIAL_8250_CONSOLE \
                    BLK_DEV_INITRD ARM_GIC_V3 ARM_PSCI_FW ; do
             grep -q "^CONFIG_$opt=y" .config \

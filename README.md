@@ -56,21 +56,15 @@ tools/build-disk.sh        # -> payloads/disk.img         (ext4 virtio-blk backi
 The kernel and BusyBox `.config` files used by those scripts are committed under
 `payloads/` for reference.
 
-`build-kernel.sh` does not build an arm64 `defconfig`. That config is a kernel
-meant to boot every arm64 machine that exists — a 43 MB `Image`, 1100-odd modules,
-and a boot spent probing for hardware this VMM does not have. The script starts
-from it and then turns off every SoC platform, PCI, ACPI, EFI and modules, which
-takes the `Image` to ~16 MB and its runtime footprint to ~17 MB. That is what
-makes 64 MiB of guest RAM a comfortable fit rather than a tight one. The script's
-comments say why each group goes, and `PLATFORMS=`/`DISABLE=`/`ENABLE=` override
-any of it:
+`build-kernel.sh` starts from arm64 `defconfig` and then disables every SoC
+platform, PCI, ACPI, EFI and loadable modules — none of which this VMM presents.
+That takes the `Image` from 43 MB to 12.5 MiB and its runtime footprint from
+44 MiB to 13 MiB, which is what fits the 64 MiB guest. The script lists each
+group and what it covers; `PLATFORMS=`, `DISABLE=` and `ENABLE=` override it:
 
 ```bash
-ENABLE="ARCH_APPLE" tools/build-kernel.sh   # put a platform back
+ENABLE="ARCH_APPLE" tools/build-kernel.sh
 ```
-
-Re-enable whatever a guest needs; the culls are a statement about what this VMM
-currently emulates, not about what a guest may ever want.
 
 ## Running
 

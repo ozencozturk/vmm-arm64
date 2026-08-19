@@ -4,10 +4,8 @@ pub const Ipa = u64;
 pub const RAM_BASE: Ipa = 0x8000_0000; // 2 GiB
 pub const MiB = 1024 * 1024;
 pub const PAGE = 16 * 1024; // Apple Silicon = 16 KiB pages (hv_vm_map alignment unit)
-// 64 MiB, matching the x86 side of this project. The guest is a probe, not an
-// environment: a slim kernel (payloads/kernel.config, built by tools/build-kernel.sh)
-// with a ~17 MiB footprint and a BusyBox initramfs leave most of this free. A
-// guest that needs more is a reason to raise this, not evidence it is wrong.
+// 64 MiB, as on the x86 side of this project. The guest kernel is built slim by
+// tools/build-kernel.sh (~13 MiB footprint), so most of this is free.
 pub const RAM_SIZE: usize = 64 * MiB; // 0x0400_0000
 
 pub const SPI_BASE: u32 = 32;
