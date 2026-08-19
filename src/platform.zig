@@ -4,7 +4,11 @@ pub const Ipa = u64;
 pub const RAM_BASE: Ipa = 0x8000_0000; // 2 GiB
 pub const MiB = 1024 * 1024;
 pub const PAGE = 16 * 1024; // Apple Silicon = 16 KiB pages (hv_vm_map alignment unit)
-pub const RAM_SIZE: usize = 512 * MiB; // 0x2000_0000
+// 64 MiB, matching the x86 side of this project. The guest is a probe, not an
+// environment: a slim kernel (payloads/kernel.config, built by tools/build-kernel.sh)
+// with a ~17 MiB footprint and a BusyBox initramfs leave most of this free. A
+// guest that needs more is a reason to raise this, not evidence it is wrong.
+pub const RAM_SIZE: usize = 64 * MiB; // 0x0400_0000
 
 pub const SPI_BASE: u32 = 32;
 pub const UART_SPI: u32 = 1;
@@ -12,7 +16,7 @@ pub const UART_INTID: u32 = SPI_BASE + UART_SPI;
 
 pub const VIRTIO_SPI: u32 = 2;
 pub const VIRTIO_INTID: u32 = SPI_BASE + VIRTIO_SPI;
-pub const VIRTIO_SIZE = devices.Virtio.VIRTIO_SIZE;
+pub const VIRTIO_SIZE = devices.VirtioBlk.MMIO_SIZE;
 
 pub const VCONSOLE_SPI: u32 = 3;
 pub const VCONSOLE_INTID: u32 = SPI_BASE + VCONSOLE_SPI;

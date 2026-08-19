@@ -18,10 +18,14 @@ hardware for Linux to boot, and building the device tree the kernel needs.
   - a **PL011 UART** for the console,
   - a **GICv3** interrupt controller and the architectural timer,
   - **PSCI** (over HVC) for power control — `poweroff` in the guest halts the VM,
-  - a **virtio-blk** device backed by a raw disk image (`/dev/vda`).
+  - a **virtio-blk** device backed by a raw disk image (`/dev/vda`),
+  - a **virtio-console** on a second virtio-mmio window (`hvc0`).
 - Decodes and services system-register traps (e.g. the OS-lock registers HVF traps
   unconditionally on cold boot) and MMIO data aborts.
-- Builds the FDT itself (`src/fdt.zig`), rather than shipping a precompiled blob.
+- Builds the FDT itself, rather than shipping a precompiled blob.
+
+The guest gets **64 MiB** of RAM and a purpose-built slim kernel — see
+[Building the guest payloads](#building-the-guest-payloads).
 
 ## Requirements
 
@@ -39,9 +43,9 @@ signed binary, so it must be run from a build (`zig build run`), never a bare
 
 ## Building the guest payloads
 
-The prebuilt guest artifacts are **not** committed (a 45 MB kernel and GPL guest
-images don't belong in the repo). Generate them once with the scripts in `tools/`,
-which write into `payloads/`:
+The prebuilt guest artifacts are **not** committed (GPL guest images don't belong
+in the repo). Generate them once with the scripts in `tools/`, which write into
+`payloads/`:
 
 ```bash
 tools/build-kernel.sh      # -> payloads/Image           (arm64 Linux kernel)
@@ -51,6 +55,22 @@ tools/build-disk.sh        # -> payloads/disk.img         (ext4 virtio-blk backi
 
 The kernel and BusyBox `.config` files used by those scripts are committed under
 `payloads/` for reference.
+
+`build-kernel.sh` does not build an arm64 `defconfig`. That config is a kernel
+meant to boot every arm64 machine that exists — a 43 MB `Image`, 1100-odd modules,
+and a boot spent probing for hardware this VMM does not have. The script starts
+from it and then turns off every SoC platform, PCI, ACPI, EFI and modules, which
+takes the `Image` to ~16 MB and its runtime footprint to ~17 MB. That is what
+makes 64 MiB of guest RAM a comfortable fit rather than a tight one. The script's
+comments say why each group goes, and `PLATFORMS=`/`DISABLE=`/`ENABLE=` override
+any of it:
+
+```bash
+ENABLE="ARCH_APPLE" tools/build-kernel.sh   # put a platform back
+```
+
+Re-enable whatever a guest needs; the culls are a statement about what this VMM
+currently emulates, not about what a guest may ever want.
 
 ## Running
 
@@ -79,19 +99,17 @@ is unsigned, so any `hv_*` call would be denied), so they run anywhere Zig build
 | `src/machine.zig` | The VM: RAM, vCPU loop, exit/trap dispatch, device wiring. |
 | `src/hvf.zig` | Thin wrappers over Hypervisor.framework. |
 | `src/vcpu.zig` | vCPU state and run/exit handling. |
-| `src/arm.zig` | AArch64 register and exception-syndrome (ESR) decode tables. |
 | `src/gic.zig` | GICv3 setup and the architectural timer. |
-| `src/psci.zig` | PSCI calls over HVC. |
-| `src/fdt.zig` | Flattened device tree serializer. |
 | `src/device_tree.zig` | Builds the guest's device tree. |
-| `src/linux_boot.zig` | arm64 Linux boot protocol: payload placement and registers. |
-| `src/loader.zig`, `src/image_header.zig` | Payload loading and Image-header parsing. |
+| `src/boot_layout.zig`, `src/loader.zig` | Payload placement within RAM, and loading. |
 | `src/platform.zig`, `src/bus.zig` | Memory map and MMIO bus. |
 | `tools/` | Scripts that build the guest payloads. |
 
-Device models (UART, virtio, register-bit helpers) live in a separate reusable
-package, [virtual-hardware](https://github.com/ozencozturk/virtual-hardware),
-pulled in as a Zig dependency.
+Everything reusable — the device models (UART, virtio-blk, virtio-console and the
+virtio-mmio transport under them), the FDT serializer, the AArch64 decode tables,
+PSCI, and the Linux boot protocol — lives in a separate package,
+[virtual-platform](https://github.com/ozencozturk/virtual-platform), pulled in as
+a Zig dependency and shared with this project's x86 VMM.
 
 ## License
 

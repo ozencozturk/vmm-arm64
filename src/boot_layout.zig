@@ -10,9 +10,13 @@ const MiB = @import("platform.zig").MiB;
 // Payload placement WITHIN RAM (offsets from RAM_BASE). Constraints are from the
 // arm64 boot protocol (Documentation/arch/arm64/booting.rst); the addresses these
 // imply must match whatever the guest's device tree claims.
+// Sized against a 64 MiB RAM_SIZE. The kernel gets everything up to INITRD_OFF,
+// which is ~30 MiB against a slim Image whose header claims ~17 MiB — headroom
+// for a rebuild that re-enables something, and loadPayloads rejects an Image
+// that outgrows it rather than letting it run into the initrd.
 pub const KERNEL_OFF: usize = 0x0020_0000; // 2 MiB — Image base MUST be 2 MiB-aligned
-pub const INITRD_OFF: usize = 0x1000_0000; // 256 MiB — above the kernel
-pub const DTB_OFF: usize = 0x1F00_0000; // 496 MiB — 8-byte aligned, <2 MiB, within RAM's first 512 MiB
+pub const INITRD_OFF: usize = 0x0200_0000; // 32 MiB — above the kernel
+pub const DTB_OFF: usize = 0x03F0_0000; // 63 MiB — 8-byte aligned, within RAM's first 512 MiB
 
 pub const KERNEL_IPA: hvf.hv_ipa_t = RAM_BASE + KERNEL_OFF;
 pub const INITRD_IPA: hvf.hv_ipa_t = RAM_BASE + INITRD_OFF;
@@ -106,10 +110,11 @@ test "loadPayloads: places kernel/initrd and generates a DTB carrying the initrd
     const blob = ram[DTB_OFF..][0..p.dtb_len];
     try testing.expectEqualSlices(u8, &.{ 0xd0, 0x0d, 0xfe, 0xed }, blob[0..4]);
     // THE integration contract: initrd_end = INITRD_IPA + initrd_len is derived from
-    // THIS run's initrd length and written into the blob. 0x9000_0000 + 17 =
-    // 0x9000_0011, as two big-endian cells. A wiring that ignored initrd_len, or
-    // read a stale on-disk DTB, cannot produce these bytes.
-    const initrd_end = [_]u8{ 0, 0, 0, 0, 0x90, 0x00, 0x00, 0x11 };
+    // THIS run's initrd length and written into the blob. 0x8200_0000 + 17 =
+    // 0x8200_0011, as two big-endian cells. A wiring that ignored initrd_len, or
+    // read a stale on-disk DTB, cannot produce these bytes. Spelled out rather
+    // than computed from INITRD_IPA, so a bad layout constant fails here too.
+    const initrd_end = [_]u8{ 0, 0, 0, 0, 0x82, 0x00, 0x00, 0x11 };
     try testing.expect(std.mem.indexOf(u8, blob, &initrd_end) != null);
 }
 

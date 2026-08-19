@@ -17,6 +17,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "virtual_devices", .module = vp.module("virtual_devices") },
                 .{ .name = "fdt", .module = vp.module("fdt") },
                 .{ .name = "linux_boot", .module = vp.module("linux_boot") },
+                .{ .name = "arm64", .module = vp.module("arm64") },
             },
         }),
     });

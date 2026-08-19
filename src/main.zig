@@ -32,12 +32,10 @@ pub fn main() !void {
 // Pull the exe-module files' tests into `zig build test` (explicit, so lazy
 // analysis of unused decls can't silently drop them).
 test {
-    _ = @import("arm.zig");
     _ = @import("hvf.zig");
     _ = @import("gic.zig");
     _ = @import("bus.zig");
     _ = @import("device_tree.zig");
-    _ = @import("psci.zig");
     _ = @import("vcpu.zig");
     _ = @import("machine.zig");
     _ = @import("loader.zig");

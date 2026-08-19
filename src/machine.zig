@@ -1,8 +1,8 @@
 const std = @import("std");
 const hvf = @import("hvf.zig");
 const gic = @import("gic.zig");
-const arm = @import("arm.zig");
-const psci = @import("psci.zig");
+const arm = @import("arm64");
+const psci = @import("virtual_devices").arm64.psci;
 const SysRegIss = arm.SysRegIss;
 const devices = @import("virtual_devices");
 const bus = @import("bus.zig");
@@ -19,15 +19,11 @@ const RAM_SIZE = @import("platform.zig").RAM_SIZE;
 const POWEROFF_BASE = @import("platform.zig").POWEROFF_BASE;
 const UART_BASE = @import("platform.zig").UART_BASE;
 
-// virtio-mmio QueueNotify. The package's `Reg` enum is private, so the offset is
-// restated here; vconsole.zig:37 is the source of truth.
-const QUEUE_NOTIFY: usize = 0x050;
-
 pub const Machine = struct {
     ram: []align(std.heap.page_size_min) u8,
     vcpu: Vcpu,
     uart: devices.Uart = .{},
-    virtio: devices.Virtio = .{},
+    virtio: devices.VirtioBlk = .{},
     vconsole: devices.VirtioConsole = .{},
     out: *std.Io.Writer, // where captured guest console TX is mirrored
     fault: ?Fault = null,
@@ -106,7 +102,6 @@ pub const Machine = struct {
             .vcpu = cpu,
             .out = out,
             .virtio = .{ .disk = disk },
-            .vconsole = .{ .out = .{ .ctx = out, .write = &writeConsole } },
         };
     }
 
@@ -134,6 +129,11 @@ pub const Machine = struct {
         const exits = try self.runOn(&self.vcpu, irq);
         std.debug.print("guest halted via poweroff after {} exits \n", .{exits});
     }
+    /// Guest RAM as the device models take it.
+    fn guestMemory(self: *Machine) devices.virtqueue.Guest {
+        return .{ .memory = self.ram, .base = RAM_BASE };
+    }
+
     fn syncVirtioIrq(self: *Machine, irq: anytype) void {
         irq.setVirtio(self.virtio.irqAsserted());
     }
@@ -150,7 +150,7 @@ pub const Machine = struct {
             const stop = try self.handleExit(cpu, exit);
             lockUart(self);
             self.syncUartIrq(irq);
-            self.vconsole.serviceRx(self.ram, RAM_BASE);
+            self.vconsole.serviceRx(self.guestMemory());
             self.uart_lock.unlock();
             self.syncVirtioIrq(irq);
             self.syncVconsoleIrq(irq);
@@ -208,12 +208,16 @@ pub const Machine = struct {
     }
     fn serviceVconsole(self: *Machine, cpu: anytype, offset: usize, iss: DataAbortIss) !void {
         if (iss.isWrite()) {
-            const value = try cpu.getGpr(iss.srt);
-            try self.vconsole.store(offset, iss.size(), value);
-            if (offset == QUEUE_NOTIFY) {
-                self.lockUart();
-                defer self.uart_lock.unlock();
-                self.vconsole.notify(@truncate(value), self.ram, RAM_BASE);
+            switch (try self.vconsole.store(offset, iss.size(), try cpu.getGpr(iss.srt))) {
+                // A receive kick drains the input FIFO, which the reader thread
+                // also writes, so this shares the console lock.
+                .notify => |q| {
+                    self.lockUart();
+                    defer self.uart_lock.unlock();
+                    self.vconsole.service(q, self.guestMemory());
+                    self.drainVconsole();
+                },
+                else => {},
             }
         } else {
             try cpu.setGpr(iss.srt, try self.vconsole.load(offset, iss.size()));
@@ -221,10 +225,9 @@ pub const Machine = struct {
     }
     fn serviceVirtio(self: *Machine, cpu: anytype, offset: usize, iss: DataAbortIss) !void {
         if (iss.isWrite()) {
-            try self.virtio.store(offset, iss.size(), try cpu.getGpr(iss.srt));
-            if (self.virtio.notify_pending) {
-                self.virtio.process(self.ram, RAM_BASE);
-                self.virtio.notify_pending = false;
+            switch (try self.virtio.store(offset, iss.size(), try cpu.getGpr(iss.srt))) {
+                .notify => |q| self.virtio.service(q, self.guestMemory()),
+                else => {},
             }
         } else {
             try cpu.setGpr(iss.srt, try self.virtio.load(offset, iss.size()));
@@ -252,13 +255,17 @@ pub const Machine = struct {
         return false;
     }
 
-    // Mirror captured UART TX bytes to `out`, then reset the device's capture
-    // buffer so it never reaches its 64 KiB cap — past which UartBuffer.push
-    // silently drops (fatal for a long interactive session).
-    fn writeConsole(ctx: ?*anyopaque, bytes: []const u8) void {
-        const w: *std.Io.Writer = @ptrCast(@alignCast(ctx.?));
-        w.writeAll(bytes) catch {};
-        w.flush() catch {};
+    // Take what the guest wrote to the virtio console out to `out`. Until it is
+    // taken the device holds it, and a full ring stops the guest rather than
+    // losing any of it. `output` answers one contiguous run, so this loops.
+    fn drainVconsole(self: *Machine) void {
+        while (true) {
+            const bytes = self.vconsole.output();
+            if (bytes.len == 0) break;
+            self.out.writeAll(bytes) catch {};
+            self.vconsole.takeOutput(bytes.len);
+        }
+        self.out.flush() catch {};
     }
 
     fn drainUart(self: *Machine) void {
@@ -297,7 +304,7 @@ pub const Machine = struct {
                 self.uart.receive(byte[0]);
             }
             _ = self.vconsole.pushInput(byte[0]);
-            self.vconsole.serviceRx(self.ram, RAM_BASE);
+            self.vconsole.serviceRx(self.guestMemory());
             self.syncUartIrq(irq);
             self.syncVconsoleIrq(irq);
             self.uart_lock.unlock();
@@ -591,7 +598,7 @@ test "handleExit: exits that are not exceptions fail" {
 // answers an unknown FID with NOT_SUPPORTED and keeps running (that is its whole
 // locked default). So it returned false where the test demanded an error, and
 // removing `.hvc` was a response to a REAL failure. Two identical-looking edits;
-// only one of them was load-bearing. The test with teeth is in psci.zig.
+// only one of them was load-bearing. The test with teeth is in the package's psci.
 test "handleExit: exception classes other than a data abort fail" {
     for ([_]arm.ExceptionClass{ .wf_x, .inst_abort_lower }) |ec| {
         var m = mkMachine();
@@ -834,8 +841,9 @@ test "drainUart: guest console output past the 64 KiB tx_buffer cap is not dropp
 // The device model itself (register file, virtqueue engine, T_IN/T_OUT) is
 // exhaustively tested in the virtual-hardware package at base 0x8000_0000, which
 // IS our RAM_BASE. These tests cover only the vmm-side plumbing the package can't:
-// routing a virtio PA to load/store, the QueueNotify→process trigger against
-// (self.ram, RAM_BASE), and forwarding the completion line to the injector.
+// routing a virtio PA to load/store, dispatching the store's `.notify` action to
+// `service` against `guestMemory()`, and forwarding the completion line to the
+// injector.
 
 // A virtio register read routes through the bus, hits the device's word-only
 // load, and lands the value in the target GPR. Offset 0 is MagicValue — an exact
@@ -845,7 +853,7 @@ test "serviceVirtio: a word read returns the device register value and advances 
     var cpu = FakeVcpu{};
     const stop = try m.serviceDataAbort(&cpu, wordAbort(false, 4, platform.VIRTIO_BASE + 0x00));
     try testing.expect(!stop);
-    try testing.expectEqual(@as(u64, devices.Virtio.MAGIC_VAL), cpu.regs[4]);
+    try testing.expectEqual(@as(u64, devices.virtio_mmio.MAGIC), cpu.regs[4]);
     try testing.expectEqual(@as(u64, 4), cpu.pc);
 }
 
@@ -862,11 +870,19 @@ test "serviceVconsole: a word read at the console slot returns DeviceID 3, not t
     try testing.expectEqual(@as(u64, 2), cpu.regs[5]);
 }
 
-test "writeConsole: the sink mirrors virtio-console TX to the machine's out writer" {
+test "drainVconsole: takes what the guest wrote out to the machine's out writer, emptying the ring" {
     var buf: [64]u8 = undefined;
     var w = std.Io.Writer.fixed(&buf);
-    Machine.writeConsole(&w, "hvc");
+    var m = mkMachine();
+    m.out = &w;
+
+    // Seed the device's TX ring the way a serviced transmit chain leaves it.
+    @memcpy(m.vconsole.tx[0..3], "hvc");
+    m.vconsole.tx_len = 3;
+
+    m.drainVconsole();
     try testing.expectEqualStrings("hvc", w.buffered());
+    try testing.expectEqual(@as(usize, 0), m.vconsole.tx_len);
 }
 
 test "serviceVconsole: a QueueNotify store routes to the device and advances PC" {
@@ -875,18 +891,19 @@ test "serviceVconsole: a QueueNotify store routes to the device and advances PC"
     m.ram = &ram_backing;
     var cpu = FakeVcpu{};
     cpu.regs[3] = 0;
-    const stop = try m.serviceDataAbort(&cpu, wordAbort(true, 3, platform.VCONSOLE_BASE + QUEUE_NOTIFY));
+    const stop = try m.serviceDataAbort(&cpu, wordAbort(true, 3, platform.VCONSOLE_BASE + 0x50));
     try testing.expect(!stop);
     try testing.expectEqual(@as(u64, 4), cpu.pc);
 }
 
-// The real integration: a QueueNotify (0x50) store must invoke process
-// against (self.ram, RAM_BASE) and complete the queued T_IN request. A full
+// The real integration: a QueueNotify (0x50) store must answer `.notify` and
+// drive `service` against `guestMemory()`, completing the queued T_IN request. A full
 // single-descriptor-chain is seeded into a real RAM buffer; after the notify the
 // disk sector must have DMA'd into the guest data buffer, the status byte cleared,
-// notify_pending consumed (proving the process branch ran, not just the store),
+// the queue's available cursor advanced (proving the service branch ran, not
+// just the store),
 // the completion interrupt raised, and the line forwarded to the injector.
-test "serviceVirtio: a QueueNotify drives process — sector DMAs into guest RAM, line raised, notify consumed" {
+test "serviceVirtio: a QueueNotify drives service — sector DMAs into guest RAM, line raised, chain consumed" {
     var ram_backing: [4096]u8 align(std.heap.page_size_min) = @splat(0);
     const ram: []align(std.heap.page_size_min) u8 = &ram_backing;
 
@@ -905,12 +922,14 @@ test "serviceVirtio: a QueueNotify drives process — sector DMAs into guest RAM
 
     var m = mkMachine();
     m.ram = ram;
-    m.virtio.desc_addr = RAM_BASE + 0x100;
-    m.virtio.avail_addr = RAM_BASE + 0x80;
-    m.virtio.used_addr = RAM_BASE + 0x700;
     m.virtio.disk = &disk;
-    m.virtio.queue_ready = 1;
-    m.virtio.status = 0x4; // DRIVER_OK
+    const q = m.virtio.transport.queue(0).?;
+    q.desc = RAM_BASE + 0x100;
+    q.avail = RAM_BASE + 0x80;
+    q.used = RAM_BASE + 0x700;
+    q.num = 8;
+    q.ready = 1;
+    m.virtio.transport.status = (devices.virtio_mmio.Status{ .driver_ok = true }).toBits();
 
     var cpu = FakeVcpu{};
     var irq = FakeIrq{};
@@ -920,7 +939,7 @@ test "serviceVirtio: a QueueNotify drives process — sector DMAs into guest RAM
     try testing.expect(!stop);
     try testing.expectEqualSlices(u8, disk[0..512], ram[0x300..][0..512]); // sector DMA'd in
     try testing.expectEqual(@as(u8, 0), ram[0x600]); // status cleared
-    try testing.expect(!m.virtio.notify_pending); // process branch ran
+    try testing.expectEqual(@as(u16, 1), q.last_avail); // service branch consumed the chain
     try testing.expect(m.virtio.irqAsserted()); // completion raised the line
     try testing.expectEqual(@as(?bool, true), irq.virtioLast()); // and syncVirtioIrq forwarded it
     try testing.expectEqual(@as(u64, 4), cpu.pc); // stepped over the notify store
@@ -936,11 +955,11 @@ test "syncVirtioIrq: forwards the virtio interrupt line to the injector" {
     m.syncVirtioIrq(&irq);
     try testing.expectEqual(@as(?bool, false), irq.virtioLast());
 
-    m.virtio.interrupt_status = 0x1; // used-buffer notification pending
+    m.virtio.transport.interrupt_status = 0x1; // used-buffer notification pending
     m.syncVirtioIrq(&irq);
     try testing.expectEqual(@as(?bool, true), irq.virtioLast());
 
-    try m.virtio.store(0x64, 4, 0x1); // driver ACKs (write-1-to-clear)
+    _ = try m.virtio.store(0x64, 4, 0x1); // driver ACKs (write-1-to-clear)
     m.syncVirtioIrq(&irq);
     try testing.expectEqual(@as(?bool, false), irq.virtioLast());
 }
